@@ -1,0 +1,30 @@
+{
+  "project_info": {
+    "project_number": "835039149527",
+    "firebase_url": "https://smart-turbin-default-rtdb.asia-southeast1.firebasedatabase.app",
+    "project_id": "smart-turbin",
+    "storage_bucket": "smart-turbin.firebasestorage.app"
+  },
+  "client": [
+    {
+      "client_info": {
+        "mobilesdk_app_id": "1:835039149527:android:5c95e0fe173b4ec4f71f92",
+        "android_client_info": {
+          "package_name": "com.example.smart_turbin_app"
+        }
+      },
+      "oauth_client": [],
+      "api_key": [
+        {
+          "current_key": "AIzaSyARWxBHI7Gz2RWSPC_c6kRrxqw30wOY3dw"
+        }
+      ],
+      "services": {
+        "appinvite_service": {
+          "other_platform_oauth_client": []
+        }
+      }
+    }
+  ],
+  "configuration_version": "1"
+}
