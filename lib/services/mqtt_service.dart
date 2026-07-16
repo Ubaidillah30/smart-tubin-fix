@@ -9,14 +9,15 @@ import '../models/turbin_data.dart';
 /// Service untuk koneksi MQTT ke broker (data realtime dari ESP32)
 class MqttService {
   // Konfigurasi broker MQTT - HARUS SAMA dengan firmware ESP32
-  static const String _broker = 'broker.emqx.io'; // Sama dengan firmware
+  static const String _broker = 'broker.emqx.io';
   static const int _port = 1883;
   static const String _clientId = 'smart_turbin_app';
 
   // Topics MQTT - HARUS SAMA dengan firmware ESP32
-  static const String _topicData = 'turbin/data'; // ESP32 publish data ke sini (retained)
-  static const String _topicRelaySet = 'turbin/relay/set'; // App publish perintah relay
-  static const String _topicJadwalSet = 'turbin/relay/jadwal/set'; // App publish jadwal
+  static const String _topicData = 'turbin/data';
+  static const String _topicRelaySet = 'turbin/relay/set';
+  static const String _topicJadwalSet = 'turbin/relay/jadwal/set';
+  static const String _topicStatus = 'turbin/status'; // LWT
 
   late MqttServerClient _client;
 
@@ -38,12 +39,9 @@ class MqttService {
     _client.onSubscribed = _onSubscribed;
     _client.autoReconnect = true;
     _client.logging(on: false);
-
-    // Protokol MQTT v3.1.1
     _client.setProtocolV311();
   }
 
-  /// Koneksi ke broker MQTT
   Future<void> connect() async {
     try {
       await _client.connect();
@@ -58,10 +56,9 @@ class MqttService {
     print('MQTT connected to $_broker');
     _statusController.add(true);
 
-    // Subscribe ke topic data dari ESP32
     _client.subscribe(_topicData, MqttQos.atLeastOnce);
+    _client.subscribe('turbin/status', MqttQos.atLeastOnce);
 
-    // Listen untuk pesan masuk
     _client.updates?.listen((List<MqttReceivedMessage<MqttMessage>> messages) {
       for (var message in messages) {
         final recMessage = message.payload as MqttPublishMessage;
@@ -69,9 +66,17 @@ class MqttService {
 
         if (message.topic == _topicData) {
           _parseDataMessage(payload);
+        } else if (message.topic == 'turbin/status') {
+          _handleStatusMessage(payload);
         }
       }
     });
+  }
+
+  void _handleStatusMessage(String payload) {
+    final isOnline = payload.trim().toLowerCase() == 'online';
+    print('MQTT device status: $payload');
+    _statusController.add(isOnline);
   }
 
   void _onDisconnected() {
@@ -149,7 +154,7 @@ class MqttService {
   }
 
   /// Kirim jadwal relay ke ESP32
-  /// Firmware mengharapkan JSON array langsung: [{"mulai":"06:00","selesai":"09:00","aktif":true},...]
+  /// Firmware mengharapkan JSON array langsung: [{"mulai":"2026-07-16 06:00","selesai":"2026-07-16 09:00","aktif":true},...]
   void setJadwal(List<Map<String, dynamic>> slots) {
     if (_client.connectionStatus?.state != MqttConnectionState.connected) {
       print('MQTT not connected, cannot send jadwal');
