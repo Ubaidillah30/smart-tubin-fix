@@ -32,7 +32,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   final FirebaseService _fb = FirebaseService();
   bool _tabHistory = true;
 
-  // ── Jadwal lokal (live-edit), sync dari MQTT via widget.jadwalSaatIni ──
   late List<JadwalSlot> _slotLokal;
 
   @override
@@ -44,30 +43,51 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   @override
   void didUpdateWidget(covariant HistoryJadwalScreen oldWidget) {
     super.didUpdateWidget(oldWidget);
-    // Refresh dari MQTT hanya jika tidak sedang user edit (sederhana: selalu sync)
     if (oldWidget.jadwalSaatIni != widget.jadwalSaatIni) {
       setState(() => _slotLokal = _hanyaAktif(widget.jadwalSaatIni));
     }
   }
 
-  /// Ambil hanya slot yang benar-benar aktif/terisi dari firmware.
   List<JadwalSlot> _hanyaAktif(List<JadwalSlot> src) {
     return src
         .where((s) => s.aktif && s.mulai != '00:00' && s.selesai != '00:00')
         .toList();
   }
 
-  Future<TimeOfDay?> _pilihJam(BuildContext context, TimeOfDay initial) async {
-    return await showTimePicker(
-      context: context,
-      initialTime: initial,
-      helpText: 'Pilih Jam & Menit',
-    );
+  /// Helper: parse "YYYY-MM-DD HH:MM" -> DateTime, atau null
+  DateTime? _parseWaktu(String str) {
+    try {
+      if (str.length >= 16 && str.contains('-')) {
+        return DateTime.parse(str.replaceAll(' ', 'T'));
+      }
+      // format "HH:MM" saja -> pakai hari ini
+      final parts = str.split(':');
+      final now = DateTime.now();
+      return DateTime(now.year, now.month, now.day,
+          int.parse(parts[0]), int.parse(parts[1]));
+    } catch (_) {
+      return null;
+    }
   }
 
-  Future<MapEntry<String, String>?> _tampilkanDialogEditor(JadwalSlot? slotLama) {
-    TimeOfDay? mulai = slotLama != null ? TimeOfDay(hour: int.parse(slotLama.mulai.split(':')[0]), minute: int.parse(slotLama.mulai.split(':')[1])) : null;
-    TimeOfDay? selesai = slotLama != null ? TimeOfDay(hour: int.parse(slotLama.selesai.split(':')[0]), minute: int.parse(slotLama.selesai.split(':')[1])) : null;
+  /// Format DateTime -> "YYYY-MM-DD HH:MM"
+  String _formatWaktu(DateTime dt) {
+    return '${dt.year.toString().padLeft(4, '0')}-'
+        '${dt.month.toString().padLeft(2, '0')}-'
+        '${dt.day.toString().padLeft(2, '0')} '
+        '${dt.hour.toString().padLeft(2, '0')}:'
+        '${dt.minute.toString().padLeft(2, '0')}';
+  }
+
+  /// Dialog date + time picker untuk mulai dan selesai
+  Future<MapEntry<String, String>?> _tampilkanDialogEditor(
+      JadwalSlot? slotLama) {
+    DateTime? mulai = slotLama != null
+        ? _parseWaktu(slotLama.mulai) ?? DateTime.now()
+        : null;
+    DateTime? selesai = slotLama != null
+        ? _parseWaktu(slotLama.selesai) ?? DateTime.now().add(const Duration(hours: 1))
+        : null;
 
     final dark = widget.isDark;
     final bg = dark ? AppColors.cardDark : Colors.white;
@@ -81,25 +101,38 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
           builder: (context, setDialogState) {
             final valid = mulai != null && selesai != null;
 
-            Widget tombolSet(String label, TimeOfDay? nilai, VoidCallback onPressed) {
+            Widget tombolDateTime(String label, DateTime? nilai,
+                VoidCallback onTap) {
               return Column(
                 crossAxisAlignment: CrossAxisAlignment.stretch,
                 children: [
-                  Text(label, style: TextStyle(color: txtSec, fontSize: 11, fontWeight: FontWeight.bold)),
+                  Text(label,
+                      style: TextStyle(
+                          color: txtSec,
+                          fontSize: 11,
+                          fontWeight: FontWeight.bold)),
                   const SizedBox(height: 6),
                   OutlinedButton.icon(
                     style: OutlinedButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(vertical: 12, horizontal: 16),
+                      padding: const EdgeInsets.symmetric(
+                          vertical: 12, horizontal: 16),
                       foregroundColor: AppColors.accentGreen,
-                      side: BorderSide(color: AppColors.accentGreen.withOpacity(0.4)),
-                      shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(10)),
+                      side: BorderSide(
+                          color: AppColors.accentGreen.withOpacity(0.4)),
+                      shape: RoundedRectangleBorder(
+                          borderRadius: BorderRadius.circular(10)),
                     ),
-                    icon: const Icon(Icons.access_time, size: 18),
+                    icon: const Icon(Icons.calendar_month, size: 18),
                     label: Text(
-                      nilai == null ? 'Pilih Jam' : nilai.format(context),
-                      style: TextStyle(color: txtPrimary, fontSize: 13, fontWeight: FontWeight.w600),
+                      nilai == null
+                          ? 'Pilih Tanggal & Jam'
+                          : '${DateFormat('dd MMM HH:mm').format(nilai)}',
+                      style: TextStyle(
+                          color: txtPrimary,
+                          fontSize: 13,
+                          fontWeight: FontWeight.w600),
                     ),
-                    onPressed: onPressed,
+                    onPressed: onTap,
                   ),
                 ],
               );
@@ -107,48 +140,54 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
 
             return AlertDialog(
               backgroundColor: bg,
-              shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(16)),
+              shape: RoundedRectangleBorder(
+                  borderRadius: BorderRadius.circular(16)),
               title: Text(
                 slotLama == null ? 'Tambah Jadwal Baru' : 'Edit Jadwal',
-                style: TextStyle(color: txtPrimary, fontSize: 16, fontWeight: FontWeight.bold),
+                style: TextStyle(
+                    color: txtPrimary,
+                    fontSize: 16,
+                    fontWeight: FontWeight.bold),
               ),
               content: Column(
                 mainAxisSize: MainAxisSize.min,
                 children: [
-                  tombolSet('WAKTU MULAI', mulai, () async {
-                    final jam = await _pilihJam(context, mulai ?? TimeOfDay.now());
-                    if (jam != null) {
-                      setDialogState(() => mulai = jam);
-                    }
+                  tombolDateTime('WAKTU MULAI', mulai, () async {
+                    final dt = await _pilihDateTime(
+                        context, mulai ?? DateTime.now(), 'Pilih Waktu Mulai');
+                    if (dt != null) setDialogState(() => mulai = dt);
                   }),
                   const SizedBox(height: 16),
-                  tombolSet('WAKTU SELESAI', selesai, () async {
-                    final jam = await _pilihJam(context, selesai ?? TimeOfDay.now());
-                    if (jam != null) {
-                      setDialogState(() => selesai = jam);
-                    }
+                  tombolDateTime('WAKTU SELESAI', selesai, () async {
+                    final dt = await _pilihDateTime(
+                        context,
+                        selesai ?? DateTime.now().add(const Duration(hours: 1)),
+                        'Pilih Waktu Selesai');
+                    if (dt != null) setDialogState(() => selesai = dt);
                   }),
                 ],
               ),
               actions: [
                 TextButton(
                   onPressed: () => Navigator.pop(context),
-                  child: const Text('Batal', style: TextStyle(color: AppColors.danger)),
+                  child: const Text('Batal',
+                      style: TextStyle(color: AppColors.danger)),
                 ),
                 ElevatedButton(
                   style: ElevatedButton.styleFrom(
                     backgroundColor: AppColors.accentGreen,
                     foregroundColor: Colors.black87,
-                    disabledBackgroundColor: AppColors.accentGreen.withOpacity(0.3),
-                    shape: RoundedRectangleBorder(borderRadius: BorderRadius.circular(8)),
+                    disabledBackgroundColor:
+                        AppColors.accentGreen.withOpacity(0.3),
+                    shape: RoundedRectangleBorder(
+                        borderRadius: BorderRadius.circular(8)),
                   ),
                   onPressed: valid
-                      ? () => Navigator.pop(context, MapEntry(
-                          '${mulai!.hour.toString().padLeft(2, '0')}:${mulai!.minute.toString().padLeft(2, '0')}',
-                          '${selesai!.hour.toString().padLeft(2, '0')}:${selesai!.minute.toString().padLeft(2, '0')}',
-                        ))
+                      ? () => Navigator.pop(context,
+                          MapEntry(_formatWaktu(mulai!), _formatWaktu(selesai!)))
                       : null,
-                  child: const Text('Simpan', style: TextStyle(fontWeight: FontWeight.bold)),
+                  child: const Text('Simpan',
+                      style: TextStyle(fontWeight: FontWeight.bold)),
                 ),
               ],
             );
@@ -158,7 +197,29 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
     );
   }
 
-  // ── Build ──
+  /// Date picker lalu time picker, return DateTime gabungan
+  Future<DateTime?> _pilihDateTime(
+      BuildContext context, DateTime initial, String title) async {
+    final date = await showDatePicker(
+      context: context,
+      initialDate: initial,
+      firstDate: DateTime.now().subtract(const Duration(days: 365)),
+      lastDate: DateTime.now().add(const Duration(days: 365)),
+      helpText: title,
+    );
+    if (date == null) return null;
+
+    if (!context.mounted) return date;
+    final time = await showTimePicker(
+      context: context,
+      initialTime: TimeOfDay.fromDateTime(initial),
+      helpText: title,
+    );
+    if (time == null) return date;
+
+    return DateTime(date.year, date.month, date.day, time.hour, time.minute);
+  }
+
   @override
   Widget build(BuildContext context) {
     return ListView(
@@ -183,12 +244,12 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
     );
   }
 
-  // ── Tab selector ──
   Widget _buildSwitchTab() {
     final dark = widget.isDark;
 
     Widget tombol(String label, bool aktif, VoidCallback onTap) {
-      final inactiveBg = dark ? AppColors.cardDark : const Color(0xFFEDF2F7);
+      final inactiveBg =
+          dark ? AppColors.cardDark : const Color(0xFFEDF2F7);
       final inactiveTxt =
           dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
       return Expanded(
@@ -212,9 +273,11 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
 
     return Row(
       children: [
-        tombol('HISTORY', _tabHistory, () => setState(() => _tabHistory = true)),
+        tombol('HISTORY', _tabHistory,
+            () => setState(() => _tabHistory = true)),
         const SizedBox(width: 10),
-        tombol('JADWAL', !_tabHistory, () => setState(() => _tabHistory = false)),
+        tombol('JADWAL', !_tabHistory,
+            () => setState(() => _tabHistory = false)),
       ],
     );
   }
@@ -266,8 +329,7 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
                             color: AppColors.accentGreen)),
                   )
                 else if (snapshot.data!.isEmpty)
-                  Text('Belum ada riwayat.',
-                      style: TextStyle(color: txtSec))
+                  Text('Belum ada riwayat.', style: TextStyle(color: txtSec))
                 else
                   ...snapshot.data!.map((item) => _buildHistoryRow(item, dark)),
               ],
@@ -281,8 +343,10 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   Widget _buildHistoryRow(RelayHistoryItem item, bool dark) {
     final formatter = DateFormat('dd MMM yyyy, HH:mm');
     final nyala = item.aksi == 'ON';
-    final txtPrimary = dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
-    final txtSec = dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
+    final txtPrimary =
+        dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
+    final txtSec =
+        dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
 
     return Padding(
       padding: const EdgeInsets.symmetric(vertical: 8),
@@ -314,8 +378,10 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   // =========================================================
   Widget _buildJadwalEditor() {
     final dark = widget.isDark;
-    final txtPrimary = dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
-    final txtSec = dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
+    final txtPrimary =
+        dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
+    final txtSec =
+        dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
     final bisaTambah = _slotLokal.length < _kMaxSlot;
 
     return Card(
@@ -324,7 +390,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
         child: Column(
           crossAxisAlignment: CrossAxisAlignment.start,
           children: [
-            // ── Header ──
             Row(
               children: [
                 Container(
@@ -338,23 +403,23 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
                 ),
                 const SizedBox(width: 10),
                 Expanded(
-                  child: Text('JADWAL RELAY (${_slotLokal.length}/$_kMaxSlot)',
+                  child: Text(
+                      'JADWAL RELAY (${_slotLokal.length}/$_kMaxSlot)',
                       style: TextStyle(
                           color: txtPrimary,
                           fontSize: 15,
                           fontWeight: FontWeight.w600)),
                 ),
-                // Tombol Tambah
                 if (bisaTambah)
                   TextButton.icon(
                     onPressed: _tambahSlot,
-                    icon: const Icon(Icons.add, size: 18,
-                        color: AppColors.accentGreen),
+                    icon: const Icon(Icons.add,
+                        size: 18, color: AppColors.accentGreen),
                     label: const Text('Tambah',
                         style: TextStyle(color: AppColors.accentGreen)),
                     style: TextButton.styleFrom(
-                      padding: const EdgeInsets.symmetric(
-                          horizontal: 10, vertical: 6),
+                      padding:
+                          const EdgeInsets.symmetric(horizontal: 10, vertical: 6),
                     ),
                   ),
               ],
@@ -366,7 +431,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
             ),
             const SizedBox(height: 14),
 
-            // ── Daftar slot ──
             if (_slotLokal.isEmpty)
               Padding(
                 padding: const EdgeInsets.symmetric(vertical: 16),
@@ -388,9 +452,12 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   }
 
   Widget _buildSlotRow(int index, JadwalSlot slot, bool dark) {
-    final bgCard = dark ? AppColors.cardDarkAlt : const Color(0xFFEDF2F7);
-    final txtPrimary = dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
-    final txtSec = dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
+    final bgCard =
+        dark ? AppColors.cardDarkAlt : const Color(0xFFEDF2F7);
+    final txtPrimary =
+        dark ? AppColors.textPrimary : AppColors.textPrimaryLight;
+    final txtSec =
+        dark ? AppColors.textSecondary : AppColors.textSecondaryLight;
 
     return Container(
       margin: const EdgeInsets.only(bottom: 10),
@@ -407,7 +474,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
       ),
       child: Row(
         children: [
-          // Nomor slot
           Container(
             width: 28,
             height: 28,
@@ -423,7 +489,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
                     fontSize: 13)),
           ),
           const SizedBox(width: 10),
-          // Jam mulai - selesai
           Expanded(
             child: Column(
               crossAxisAlignment: CrossAxisAlignment.start,
@@ -438,16 +503,15 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
               ],
             ),
           ),
-          // Edit
           IconButton(
             icon: Icon(Icons.edit_outlined,
                 color: AppColors.accentGreen, size: 20),
             tooltip: 'Edit waktu',
             onPressed: () => _editWaktuSlot(index, slot),
           ),
-          // Hapus
           IconButton(
-            icon: Icon(Icons.delete_outline, color: AppColors.danger, size: 20),
+            icon: Icon(Icons.delete_outline,
+                color: AppColors.danger, size: 20),
             tooltip: 'Hapus jadwal',
             onPressed: () => _hapusSlot(index),
           ),
@@ -459,8 +523,6 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   // =========================================================
   // ── Actions ──
   // =========================================================
-
-  /// Tambah slot baru dengan Date & Time Picker.
   void _tambahSlot() async {
     final hasil = await _tampilkanDialogEditor(null);
     if (hasil == null || !mounted) return;
@@ -474,20 +536,19 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
     _kirimSemuaSlot();
   }
 
-  /// Edit epoch pada slot tertentu dengan picker.
   Future<void> _editWaktuSlot(int index, JadwalSlot slot) async {
     final hasil = await _tampilkanDialogEditor(slot);
     if (hasil == null || !mounted) return;
 
     setState(() {
       final updated = List<JadwalSlot>.from(_slotLokal);
-      updated[index] = JadwalSlot(mulai: hasil.key, selesai: hasil.value, aktif: slot.aktif);
+      updated[index] = JadwalSlot(
+          mulai: hasil.key, selesai: hasil.value, aktif: slot.aktif);
       _slotLokal = updated;
     });
     _kirimSemuaSlot();
   }
 
-  /// Hapus slot dari daftar.
   void _hapusSlot(int index) {
     setState(() {
       final updated = List<JadwalSlot>.from(_slotLokal);
@@ -497,7 +558,7 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
     _kirimSemuaSlot();
   }
 
-  /// Kirim semua slot aktif ke firmware via MQTT. Sisa slot dikosongkan.
+  /// Kirim semua slot ke firmware via MQTT. Format dengan tanggal penuh.
   void _kirimSemuaSlot() {
     final payload = <Map<String, dynamic>>[];
     for (int i = 0; i < _kMaxSlot; i++) {
@@ -505,7 +566,8 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
         final s = _slotLokal[i];
         payload.add({'mulai': s.mulai, 'selesai': s.selesai, 'aktif': true});
       } else {
-        payload.add({'mulai': '00:00', 'selesai': '00:00', 'aktif': false});
+        payload.add(
+            {'mulai': '00:00', 'selesai': '00:00', 'aktif': false});
       }
     }
     widget.onSimpanJadwal(payload);

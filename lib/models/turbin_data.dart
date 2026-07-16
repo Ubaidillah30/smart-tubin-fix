@@ -111,10 +111,10 @@ class DayaInfo {
   }
 }
 
-/// Slot jadwal relay
+/// Slot jadwal relay (dengan dukungan tanggal penuh)
 class JadwalSlot {
-  final String mulai;
-  final String selesai;
+  final String mulai;    // "HH:MM" atau "YYYY-MM-DD HH:MM"
+  final String selesai;  // "HH:MM" atau "YYYY-MM-DD HH:MM"
   final bool aktif;
 
   JadwalSlot({
@@ -123,6 +123,9 @@ class JadwalSlot {
     required this.aktif,
   });
 
+  /// Parsing dari JSON firmware.
+  /// Format baru: "2026-07-16 06:00" (dengan tanggal)
+  /// Format lama: "06:00" (tanpa tanggal, backward compat)
   factory JadwalSlot.fromJson(Map<String, dynamic> json) {
     return JadwalSlot(
       mulai: json['mulai'] ?? '00:00',
@@ -137,6 +140,28 @@ class JadwalSlot {
       'selesai': selesai,
       'aktif': aktif,
     };
+  }
+
+  /// Apakah slot ini memiliki tanggal lengkap (bukan hanya jam)?
+  bool get punyaTanggal => mulai.length >= 16 && mulai.contains('-');
+
+  /// Parse tanggal dari string "YYYY-MM-DD HH:MM"
+  DateTime? get waktuMulai {
+    if (!punyaTanggal) return null;
+    try {
+      return DateTime.parse(mulai.replaceAll(' ', 'T'));
+    } catch (_) {
+      return null;
+    }
+  }
+
+  DateTime? get waktuSelesai {
+    if (!punyaTanggal) return null;
+    try {
+      return DateTime.parse(selesai.replaceAll(' ', 'T'));
+    } catch (_) {
+      return null;
+    }
   }
 }
 

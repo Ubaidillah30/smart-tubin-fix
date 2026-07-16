@@ -127,14 +127,20 @@ const float BATTERY_CURVE_V[] = {11.31, 11.58, 11.75, 11.90, 12.06, 12.20, 12.32
 const int   BATTERY_CURVE_P[] = {   0,    10,    20,    30,    40,    50,    60,    70,    80,   100};
 const int   BATTERY_CURVE_N = sizeof(BATTERY_CURVE_P) / sizeof(int);
 
-// ================= RELAY: MODE, JADWAL, HISTORY =================
+// ================= RELAY: MODE, JADWAL (dengan TANGGAL), HISTORY =================
 // relayMode: 0 = AUTO (ikut jadwal), 1 = MANUAL ON, 2 = MANUAL OFF
 int relayMode = 0;
 bool statusRelay = false;
 
 struct JadwalRelay {
+  uint16_t tahunMulai;
+  uint8_t bulanMulai;
+  uint8_t hariMulai;
   uint8_t jamMulai;
   uint8_t menitMulai;
+  uint16_t tahunSelesai;
+  uint8_t bulanSelesai;
+  uint8_t hariSelesai;
   uint8_t jamSelesai;
   uint8_t menitSelesai;
   bool aktif;
@@ -142,9 +148,9 @@ struct JadwalRelay {
 
 #define JUMLAH_SLOT_JADWAL 3
 JadwalRelay jadwal[JUMLAH_SLOT_JADWAL] = {
-  {6, 0, 9, 0, true},    // slot 1: 06:00 - 09:00
-  {17, 0, 21, 0, true},  // slot 2: 17:00 - 21:00
-  {0, 0, 0, 0, false}    // slot 3: kosong / nonaktif
+  {2026, 7, 16, 6, 0, 2026, 7, 16, 9, 0, true},    // slot 1: 2026-07-16 06:00 - 09:00
+  {2026, 7, 16, 17, 0, 2026, 7, 16, 21, 0, true},  // slot 2: 2026-07-16 17:00 - 21:00
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false}            // slot 3: kosong / nonaktif
 };
 
 // History relay TIDAK disimpan di RAM ESP32 - langsung dikirim ke Firebase
@@ -184,6 +190,30 @@ bool waktuSekarangJamMenit(int &jam, int &menit) {
     return true;
   }
   return false; // NTP gagal DAN RTC tidak tersedia
+}
+
+// Ambil tanggal & jam LENGKAP sekarang (lokal/WIB): NTP dulu, RTC cadangan.
+// Return false jika KEDUANYA tidak tersedia.
+bool waktuSekarangLengkap(int &tahun, int &bulan, int &hari, int &jam, int &menit) {
+  struct tm t;
+  if (getLocalTime(&t, 100)) {
+    tahun = t.tm_year + 1900;
+    bulan = t.tm_mon + 1;
+    hari = t.tm_mday;
+    jam = t.tm_hour;
+    menit = t.tm_min;
+    return true;
+  }
+  if (rtcSiap) {
+    DateTime now = rtc.now();
+    tahun = now.year();
+    bulan = now.month();
+    hari = now.day();
+    jam = now.hour();
+    menit = now.minute();
+    return true;
+  }
+  return false;
 }
 
 // Ambil epoch UTC murni sekarang, untuk field "epoch" history relay.
@@ -307,22 +337,22 @@ void setRelay(bool nyala, uint8_t mode) {
   }
 }
 
-// Cek apakah waktu sekarang (jam:menit, LOKAL/WIB) berada di dalam salah
-// satu slot jadwal. Parameter jam/menit sekarang diambil dari RTC (lihat
-// cekJadwalRelay()), bukan lagi dari struct tm hasil NTP.
-bool cekDalamJadwal(int jamSekarang, int menitSekarangArg) {
-  int menitSekarang = jamSekarang * 60 + menitSekarangArg;
+// Cek apakah waktu sekarang (tanggal + jam:menit, LOKAL/WIB) berada di dalam salah
+// satu slot jadwal. Sekarang mendukung perbandingan TANGGAL penuh.
+bool cekDalamJadwal(int tahunSekarang, int bulanSekarang, int hariSekarang, int jamSekarang, int menitSekarangArg) {
+  unsigned long menitSekarang = ((unsigned long)(tahunSekarang * 365 + bulanSekarang * 30 + hariSekarang)) * 1440 + jamSekarang * 60 + menitSekarangArg;
   for (int i = 0; i < JUMLAH_SLOT_JADWAL; i++) {
     if (!jadwal[i].aktif) continue;
-    int mulai = jadwal[i].jamMulai * 60 + jadwal[i].menitMulai;
-    int selesai = jadwal[i].jamSelesai * 60 + jadwal[i].menitSelesai;
+    unsigned long mulai = ((unsigned long)(jadwal[i].tahunMulai * 365 + jadwal[i].bulanMulai * 30 + jadwal[i].hariMulai)) * 1440
+                          + jadwal[i].jamMulai * 60 + jadwal[i].menitMulai;
+    unsigned long selesai = ((unsigned long)(jadwal[i].tahunSelesai * 365 + jadwal[i].bulanSelesai * 30 + jadwal[i].hariSelesai)) * 1440
+                           + jadwal[i].jamSelesai * 60 + jadwal[i].menitSelesai;
     if (mulai == selesai) continue; // slot kosong
 
     if (mulai < selesai) {
-      // Slot normal dalam 1 hari, misal 06:00 - 09:00
       if (menitSekarang >= mulai && menitSekarang < selesai) return true;
     } else {
-      // Slot melewati tengah malam, misal 22:00 - 05:00
+      // Melewati tengah malam (jarang dengan tanggal, tapi tetap support)
       if (menitSekarang >= mulai || menitSekarang < selesai) return true;
     }
   }
@@ -332,11 +362,15 @@ bool cekDalamJadwal(int jamSekarang, int menitSekarangArg) {
 void cekJadwalRelay() {
   if (relayMode != 0) return; // hanya berlaku kalau mode AUTO
 
-  int jam, menit;
-  if (!waktuSekarangJamMenit(jam, menit)) {
+  int tahun, bulan, hari, jam, menit;
+  if (!waktuSekarangLengkap(tahun, bulan, hari, jam, menit)) {
     Serial.println("Waktu tidak tersedia (NTP gagal & RTC tidak terdeteksi), jadwal dilewati.");
     return;
   }
+
+  bool harusNyala = cekDalamJadwal(tahun, bulan, hari, jam, menit);
+  setRelay(harusNyala, 0);
+}
 
   bool harusNyala = cekDalamJadwal(jam, menit);
   setRelay(harusNyala, 0);
@@ -390,9 +424,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
     simpanJadwal();
   }
   else if (t == String(TOPIK_DASAR) + "relay/jadwal/set") {
-    // Contoh payload JSON:
-    // [{"mulai":"06:00","selesai":"09:00","aktif":true}, {"mulai":"17:00","selesai":"21:00","aktif":true}]
-    StaticJsonDocument<512> doc;
+    // Contoh payload JSON (dengan tanggal):
+    // [{"mulai":"2026-07-16 06:00","selesai":"2026-07-16 09:00","aktif":true}, ...]
+    // Format lama (tanpa tanggal) juga tetap didukung untuk backward compat:
+    // [{"mulai":"06:00","selesai":"09:00","aktif":true}, ...]
+    StaticJsonDocument<1024> doc;
     DeserializationError err = deserializeJson(doc, pesan);
     if (!err && doc.is<JsonArray>()) {
       JsonArray arr = doc.as<JsonArray>();
@@ -401,10 +437,32 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
         if (idx >= JUMLAH_SLOT_JADWAL) break;
         String mulai = obj["mulai"].as<String>();
         String selesai = obj["selesai"].as<String>();
-        jadwal[idx].jamMulai   = mulai.substring(0, 2).toInt();
-        jadwal[idx].menitMulai = mulai.substring(3, 5).toInt();
-        jadwal[idx].jamSelesai   = selesai.substring(0, 2).toInt();
-        jadwal[idx].menitSelesai = selesai.substring(3, 5).toInt();
+
+        // Format baru: "YYYY-MM-DD HH:MM" atau "YYYY-MM-DDTHH:MM"
+        // Format lama (backward compat): "HH:MM" — pakai tanggal 0 (tanpa filter tanggal)
+        if (mulai.length() >= 16 && mulai.indexOf('-') >= 0) {
+          jadwal[idx].tahunMulai  = mulai.substring(0, 4).toInt();
+          jadwal[idx].bulanMulai  = mulai.substring(5, 7).toInt();
+          jadwal[idx].hariMulai   = mulai.substring(8, 10).toInt();
+          jadwal[idx].jamMulai    = mulai.substring(11, 13).toInt();
+          jadwal[idx].menitMulai  = mulai.substring(14, 16).toInt();
+        } else {
+          // Backward compat: tanpa tanggal, set ke 0 (tidak filter tanggal)
+          jadwal[idx].tahunMulai = 0; jadwal[idx].bulanMulai = 0; jadwal[idx].hariMulai = 0;
+          jadwal[idx].jamMulai   = mulai.substring(0, 2).toInt();
+          jadwal[idx].menitMulai = mulai.substring(3, 5).toInt();
+        }
+        if (selesai.length() >= 16 && selesai.indexOf('-') >= 0) {
+          jadwal[idx].tahunSelesai  = selesai.substring(0, 4).toInt();
+          jadwal[idx].bulanSelesai  = selesai.substring(5, 7).toInt();
+          jadwal[idx].hariSelesai   = selesai.substring(8, 10).toInt();
+          jadwal[idx].jamSelesai    = selesai.substring(11, 13).toInt();
+          jadwal[idx].menitSelesai  = selesai.substring(14, 16).toInt();
+        } else {
+          jadwal[idx].tahunSelesai = 0; jadwal[idx].bulanSelesai = 0; jadwal[idx].hariSelesai = 0;
+          jadwal[idx].jamSelesai   = selesai.substring(0, 2).toInt();
+          jadwal[idx].menitSelesai = selesai.substring(3, 5).toInt();
+        }
         jadwal[idx].aktif = obj["aktif"] | true;
         idx++;
       }
@@ -427,8 +485,19 @@ void reconnectMQTT() {
   Serial.print("Mencoba koneksi MQTT...");
   String clientId = "TURBIN-ESP32-" + WiFi.macAddress();
   clientId.replace(":", "");
-  if (mqtt.connect(clientId.c_str())) {
+
+  // LWT (Last Will & Testament): jika ESP32 disconnect mendadak, broker akan
+  // publish "offline" ke topik turbin/status dengan retain=true.
+  // Dashboard Flutter langsung tahu device offline meskipun ESP32 mati total.
+  const char* willTopic = "turbin/status";
+  const char* willPayload = "offline";
+  bool willRetain = true;
+  int willQos = 1;
+
+  if (mqtt.connect(clientId.c_str(), NULL, NULL, willTopic, willQos, willRetain, willPayload)) {
     Serial.println("Terhubung!");
+    // Publish "online" — broker auto-publish "offline" saat disconnect mendadak
+    mqtt.publish(willTopic, "online", true);
     mqtt.subscribe((String(TOPIK_DASAR) + "relay/set").c_str());
     mqtt.subscribe((String(TOPIK_DASAR) + "relay/jadwal/set").c_str());
     publishDataGabungan();
@@ -536,14 +605,29 @@ void publishDataGabungan() {
 
   // Jadwal ikut dipublish (read-back) supaya app bisa menampilkan jadwal
   // aktual yang tersimpan di device, bukan cuma bisa "set" tanpa lihat hasil.
+  // Format: "mulai":"2026-07-16 06:00", "selesai":"2026-07-16 09:00"
+  // Backward compat: jika tahun=0, kirim "HH:MM" saja (tanpa tanggal)
   JsonArray jadwalArr = doc.createNestedArray("jadwal");
   for (int i = 0; i < JUMLAH_SLOT_JADWAL; i++) {
     JsonObject slot = jadwalArr.createNestedObject();
-    char mulaiBuf[6], selesaiBuf[6];
-    snprintf(mulaiBuf, sizeof(mulaiBuf), "%02d:%02d", jadwal[i].jamMulai, jadwal[i].menitMulai);
-    snprintf(selesaiBuf, sizeof(selesaiBuf), "%02d:%02d", jadwal[i].jamSelesai, jadwal[i].menitSelesai);
-    slot["mulai"] = mulaiBuf;
-    slot["selesai"] = selesaiBuf;
+    if (jadwal[i].tahunMulai > 0) {
+      char mulaiBuf[20], selesaiBuf[20];
+      snprintf(mulaiBuf, sizeof(mulaiBuf), "%04d-%02d-%02d %02d:%02d",
+               jadwal[i].tahunMulai, jadwal[i].bulanMulai, jadwal[i].hariMulai,
+               jadwal[i].jamMulai, jadwal[i].menitMulai);
+      snprintf(selesaiBuf, sizeof(selesaiBuf), "%04d-%02d-%02d %02d:%02d",
+               jadwal[i].tahunSelesai, jadwal[i].bulanSelesai, jadwal[i].hariSelesai,
+               jadwal[i].jamSelesai, jadwal[i].menitSelesai);
+      slot["mulai"] = mulaiBuf;
+      slot["selesai"] = selesaiBuf;
+    } else {
+      // Backward compat: tanpa tanggal
+      char mulaiBuf[6], selesaiBuf[6];
+      snprintf(mulaiBuf, sizeof(mulaiBuf), "%02d:%02d", jadwal[i].jamMulai, jadwal[i].menitMulai);
+      snprintf(selesaiBuf, sizeof(selesaiBuf), "%02d:%02d", jadwal[i].jamSelesai, jadwal[i].menitSelesai);
+      slot["mulai"] = mulaiBuf;
+      slot["selesai"] = selesaiBuf;
+    }
     slot["aktif"] = jadwal[i].aktif;
   }
 
