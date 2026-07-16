@@ -6,10 +6,11 @@ import '../services/firebase_service.dart';
 import '../theme/app_theme.dart';
 import '../widgets/app_header.dart';
 
-const int _kMaxSlot = 3; // HARUS sinkron dengan JUMLAH_SLOT_JADWAL di firmware (3)
+const int _kMaxSlot = 10; // HARUS sinkron dengan JUMLAH_SLOT_JADWAL di firmware (10)
 
 class HistoryJadwalScreen extends StatefulWidget {
   final bool online;
+  final bool mqttConnected;
   final bool isDark;
   final VoidCallback onToggleTheme;
   final List<JadwalSlot> jadwalSaatIni;
@@ -18,6 +19,7 @@ class HistoryJadwalScreen extends StatefulWidget {
   const HistoryJadwalScreen({
     super.key,
     required this.online,
+    this.mqttConnected = false,
     required this.isDark,
     required this.onToggleTheme,
     required this.jadwalSaatIni,
@@ -227,6 +229,7 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
       children: [
         AppHeader(
           online: widget.online,
+          mqttConnected: widget.mqttConnected,
           isDark: widget.isDark,
           onToggleTheme: widget.onToggleTheme,
         ),

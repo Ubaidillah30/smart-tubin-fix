@@ -5,12 +5,14 @@ import '../theme/app_theme.dart';
 /// Header aplikasi dengan status online dan toggle tema
 class AppHeader extends StatelessWidget {
   final bool online;
+  final bool mqttConnected;
   final bool isDark;
   final VoidCallback onToggleTheme;
 
   const AppHeader({
     super.key,
     required this.online,
+    this.mqttConnected = false,
     required this.isDark,
     required this.onToggleTheme,
   });
@@ -65,26 +67,51 @@ class AppHeader extends StatelessWidget {
                   ),
                 ),
                 const SizedBox(height: 4),
-                Row(
-                  children: [
-                    Container(
-                      width: 8,
-                      height: 8,
-                      decoration: BoxDecoration(
-                        color: online ? AppColors.accentGreen : Colors.red,
-                        shape: BoxShape.circle,
+                // Row status wrapped in FittedBox biar nggak overflow
+                FittedBox(
+                  fit: BoxFit.scaleDown,
+                  alignment: Alignment.centerLeft,
+                  child: Row(
+                    children: [
+                      // Dashboard status
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: mqttConnected ? AppColors.accentGreen : Colors.red,
+                          shape: BoxShape.circle,
+                        ),
                       ),
-                    ),
-                    const SizedBox(width: 6),
-                    Text(
-                      online ? 'Online' : 'Offline',
-                      style: TextStyle(
-                        color: online ? AppColors.accentGreen : Colors.red,
-                        fontSize: 12,
-                        fontWeight: FontWeight.w600,
+                      const SizedBox(width: 4),
+                      Text(
+                        mqttConnected ? "Online" : "Offline",
+                        style: TextStyle(
+                          color: mqttConnected ? AppColors.accentGreen : Colors.red,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
                       ),
-                    ),
-                  ],
+                      const SizedBox(width: 10),
+                      // ESP32 status
+                      Container(
+                        width: 7,
+                        height: 7,
+                        decoration: BoxDecoration(
+                          color: online ? AppColors.accentGreen : Colors.red,
+                          shape: BoxShape.circle,
+                        ),
+                      ),
+                      const SizedBox(width: 4),
+                      Text(
+                        'ESP: ${online ? "On" : "Off"}',
+                        style: TextStyle(
+                          color: online ? AppColors.accentGreen : Colors.red,
+                          fontSize: 11,
+                          fontWeight: FontWeight.w600,
+                        ),
+                      ),
+                    ],
+                  ),
                 ),
               ],
             ),

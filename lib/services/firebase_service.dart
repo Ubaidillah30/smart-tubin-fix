@@ -15,7 +15,7 @@ class FirebaseService {
   final DatabaseReference _root = FirebaseDatabase.instance.ref();
 
   /// Histori relay, urut terbaru dulu, dibatasi [limit] entri terakhir.
-  Stream<List<RelayHistoryItem>> historiRelay({int limit = 30}) {
+  Stream<List<RelayHistoryItem>> historiRelay({int limit = 10}) {
     final query = _root.child('history/relay').limitToLast(limit);
     return query.onValue.map((event) {
       final data = event.snapshot.value;
