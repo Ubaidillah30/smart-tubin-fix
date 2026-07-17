@@ -40,6 +40,10 @@ class _HistoryJadwalScreenState extends State<HistoryJadwalScreen> {
   void initState() {
     super.initState();
     _slotLokal = _hanyaAktif(widget.jadwalSaatIni);
+    // Prune history relay otomatis tiap ada data baru (queue FIFO)
+    _fb.historiRelay().listen((_) {
+      _fb.pruneRelayHistory();
+    });
   }
 
   @override
