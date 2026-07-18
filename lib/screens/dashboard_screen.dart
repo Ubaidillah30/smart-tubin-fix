@@ -29,7 +29,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
   final MqttService _mqtt = MqttService();
 
   TurbinData _data = TurbinData.kosong();
-  bool _online = false;
+  bool _espOnline = false;
+  bool _mqttConnected = false;
   int _tabIndex = 0;
 
   MetrikGrafik _metrik = MetrikGrafik.teganganMasuk;
@@ -39,8 +40,11 @@ class _DashboardScreenState extends State<DashboardScreen> {
   @override
   void initState() {
     super.initState();
-    _mqtt.statusStream.listen((status) {
-      if (mounted) setState(() => _online = status);
+    _mqtt.mqttStatusStream.listen((status) {
+      if (mounted) setState(() => _mqttConnected = status);
+    });
+    _mqtt.espStatusStream.listen((status) {
+      if (mounted) setState(() => _espOnline = status);
     });
     _mqtt.dataStream.listen((data) {
       if (!mounted) return;
@@ -96,7 +100,7 @@ class _DashboardScreenState extends State<DashboardScreen> {
       } else if (perintah == 'OFF') {
         _data = _data.copyWith(relayOn: false, relayMode: 'MANUAL_OFF');
       } else if (perintah == 'AUTO') {
-        _data = _data.copyWith(relayMode: 'AUTO');
+        _data = _data.copyWith(relayMode: 'AUTO', relayOn: false);
       }
     });
     _mqtt.setRelay(perintah);
@@ -117,7 +121,8 @@ class _DashboardScreenState extends State<DashboardScreen> {
           children: [
             _buildDashboardTab(),
             HistoryJadwalScreen(
-              online: _online,
+              online: _espOnline,
+              mqttConnected: _mqttConnected,
               isDark: widget.isDark,
               onToggleTheme: widget.onToggleTheme,
               jadwalSaatIni: _data.jadwal,
@@ -143,53 +148,60 @@ class _DashboardScreenState extends State<DashboardScreen> {
   }
 
   Widget _buildDashboardTab() {
-    return ListView(
-      padding: const EdgeInsets.only(bottom: 24),
-      children: [
-        AppHeader(
-          online: _online,
-          isDark: widget.isDark,
-          onToggleTheme: widget.onToggleTheme,
-        ),
-        Padding(
-          padding: const EdgeInsets.symmetric(horizontal: 16),
-          child: Column(
-            children: [
-              WindCard(s1: _data.anginS1, s2: _data.anginS2, s3: _data.anginS3),
-              const SizedBox(height: 14),
-              PowerCard(
-                title: 'ENERGI MASUK (SUMBER)',
-                icon: Icons.wind_power,
-                tegangan: _data.dayaMasuk.tegangan,
-                arus: _data.dayaMasuk.arus,
-                daya: _data.dayaMasuk.daya,
-              ),
-              const SizedBox(height: 14),
-              PowerCard(
-                title: 'ENERGI KELUAR (BEBAN)',
-                icon: Icons.electrical_services,
-                tegangan: _data.dayaKeluar.tegangan,
-                arus: _data.dayaKeluar.arus,
-                daya: _data.dayaKeluar.daya,
-              ),
-              const SizedBox(height: 14),
-              _buildKartuBaterai(),
-              const SizedBox(height: 14),
-              RelayCard(
-                relayOn: _data.relayOn,
-                mode: _data.relayMode,
-                onPilihMode: _kirimPerintahRelay,
-              ),
-              const SizedBox(height: 14),
-              MonitoringChart(
-                metrikTerpilih: _metrik,
-                onMetrikChanged: _gantiMetrik,
-                dataPoints: _bufferGrafik,
-              ),
-            ],
+    return RefreshIndicator(
+      onRefresh: () async {
+        _mqtt.reconnect();
+        await Future.delayed(const Duration(seconds: 2));
+      },
+      child: ListView(
+        padding: const EdgeInsets.only(bottom: 24),
+        children: [
+          AppHeader(
+            online: _espOnline,
+            mqttConnected: _mqttConnected,
+            isDark: widget.isDark,
+            onToggleTheme: widget.onToggleTheme,
           ),
-        ),
-      ],
+          Padding(
+            padding: const EdgeInsets.symmetric(horizontal: 16),
+            child: Column(
+              children: [
+                WindCard(s1: _data.anginS1, s2: _data.anginS2, s3: _data.anginS3),
+                const SizedBox(height: 14),
+                PowerCard(
+                  title: 'ENERGI MASUK (SUMBER)',
+                  icon: Icons.wind_power,
+                  tegangan: _data.dayaMasuk.tegangan,
+                  arus: _data.dayaMasuk.arus,
+                  daya: _data.dayaMasuk.daya,
+                ),
+                const SizedBox(height: 14),
+                PowerCard(
+                  title: 'ENERGI KELUAR (BEBAN)',
+                  icon: Icons.electrical_services,
+                  tegangan: _data.dayaKeluar.tegangan,
+                  arus: _data.dayaKeluar.arus,
+                  daya: _data.dayaKeluar.daya,
+                ),
+                const SizedBox(height: 14),
+                _buildKartuBaterai(),
+                const SizedBox(height: 14),
+                RelayCard(
+                  relayOn: _data.relayOn,
+                  mode: _data.relayMode,
+                  onPilihMode: _kirimPerintahRelay,
+                ),
+                const SizedBox(height: 14),
+                MonitoringChart(
+                  metrikTerpilih: _metrik,
+                  onMetrikChanged: _gantiMetrik,
+                  dataPoints: _bufferGrafik,
+                ),
+              ],
+            ),
+          ),
+        ],
+      ),
     );
   }
 

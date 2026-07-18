@@ -21,11 +21,15 @@ class MqttService {
 
   late MqttServerClient _client;
 
-  final StreamController<bool> _statusController = StreamController<bool>.broadcast();
+  final StreamController<bool> _espStatusController = StreamController<bool>.broadcast();
+  final StreamController<bool> _mqttStatusController = StreamController<bool>.broadcast();
   final StreamController<TurbinData> _dataController = StreamController<TurbinData>.broadcast();
 
-  /// Stream status koneksi (true = online, false = offline)
-  Stream<bool> get statusStream => _statusController.stream;
+  /// Stream status ESP device (online/offline dari turbin/status)
+  Stream<bool> get espStatusStream => _espStatusController.stream;
+
+  /// Stream status koneksi MQTT (dashboard terhubung ke broker)
+  Stream<bool> get mqttStatusStream => _mqttStatusController.stream;
 
   /// Stream data turbin realtime dari MQTT
   Stream<TurbinData> get dataStream => _dataController.stream;
@@ -48,13 +52,14 @@ class MqttService {
     } catch (e) {
       print('MQTT connect error: $e');
       _client.disconnect();
-      _statusController.add(false);
+      _mqttStatusController.add(false);
+      _espStatusController.add(false);
     }
   }
 
   void _onConnected() {
     print('MQTT connected to $_broker');
-    _statusController.add(true);
+    _mqttStatusController.add(true);
 
     _client.subscribe(_topicData, MqttQos.atLeastOnce);
     _client.subscribe('turbin/status', MqttQos.atLeastOnce);
@@ -76,12 +81,12 @@ class MqttService {
   void _handleStatusMessage(String payload) {
     final isOnline = payload.trim().toLowerCase() == 'online';
     print('MQTT device status: $payload');
-    _statusController.add(isOnline);
+    _espStatusController.add(isOnline);
   }
 
   void _onDisconnected() {
     print('MQTT disconnected');
-    _statusController.add(false);
+    _mqttStatusController.add(false);
   }
 
   void _onSubscribed(String topic) {
@@ -175,10 +180,20 @@ class MqttService {
     print('MQTT sent jadwal: ${slots.length} slots');
   }
 
+  /// Reconnect MQTT — disconnect dulu, biarkan autoReconnect sambung ulang
+  void reconnect() {
+    if (_client.connectionStatus?.state == MqttConnectionState.connected) {
+      _client.disconnect();
+    } else {
+      connect();
+    }
+  }
+
   /// Cleanup saat service di-dispose
   void dispose() {
     _client.disconnect();
-    _statusController.close();
+    _espStatusController.close();
+    _mqttStatusController.close();
     _dataController.close();
   }
 }

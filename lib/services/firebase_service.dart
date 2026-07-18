@@ -15,7 +15,7 @@ class FirebaseService {
   final DatabaseReference _root = FirebaseDatabase.instance.ref();
 
   /// Histori relay, urut terbaru dulu, dibatasi [limit] entri terakhir.
-  Stream<List<RelayHistoryItem>> historiRelay({int limit = 30}) {
+  Stream<List<RelayHistoryItem>> historiRelay({int limit = 10}) {
     final query = _root.child('history/relay').limitToLast(limit);
     return query.onValue.map((event) {
       final data = event.snapshot.value;
@@ -27,6 +27,32 @@ class FirebaseService {
       items.sort((a, b) => b.waktu.compareTo(a.waktu));
       return items;
     });
+  }
+
+  /// Hapus history relay tertua jika total > [maxEntries].
+  /// Konsep queue: FIFO — hapus entry paling lama sampai tersisa [maxEntries].
+  Future<void> pruneRelayHistory({int maxEntries = 10}) async {
+    final snapshot = await _root.child('history/relay').get();
+    final data = snapshot.value;
+    if (data == null || data is! Map) return;
+
+    if (data.length <= maxEntries) return;
+
+    // Sort entries by timestamp ascending (oldest first)
+    final entries = data.entries.map((e) {
+      final map = e.value as Map;
+      final ts = map['ts'] ?? map['epoch'] ?? 0;
+      return MapEntry(e.key, (ts as num).toInt());
+    }).toList();
+    entries.sort((a, b) => a.value.compareTo(b.value));
+
+    // Delete oldest entries until only maxEntries remain
+    final deleteCount = entries.length - maxEntries;
+    final updates = <String, Object?>{};
+    for (int i = 0; i < deleteCount; i++) {
+      updates['history/relay/${entries[i].key}'] = null;
+    }
+    await _root.update(updates);
   }
 
   /// Rekap kecepatan angin 5 menitan untuk 1 sensor.

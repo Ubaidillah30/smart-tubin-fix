@@ -146,11 +146,18 @@ struct JadwalRelay {
   bool aktif;
 };
 
-#define JUMLAH_SLOT_JADWAL 3
+#define JUMLAH_SLOT_JADWAL 10
 JadwalRelay jadwal[JUMLAH_SLOT_JADWAL] = {
-  {2026, 7, 16, 6, 0, 2026, 7, 16, 9, 0, true},    // slot 1: 2026-07-16 06:00 - 09:00
-  {2026, 7, 16, 17, 0, 2026, 7, 16, 21, 0, true},  // slot 2: 2026-07-16 17:00 - 21:00
-  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false}            // slot 3: kosong / nonaktif
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},            // slot 1-10: kosong / nonaktif
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false},
+  {0, 0, 0, 0, 0, 0, 0, 0, 0, 0, false}
 };
 
 // History relay TIDAK disimpan di RAM ESP32 - langsung dikirim ke Firebase
@@ -252,6 +259,205 @@ void IRAM_ATTR isr1() { pulse1++; }
 void IRAM_ATTR isr2() { pulse2++; }
 void IRAM_ATTR isr3() { pulse3++; }
 
+// ================= DEKLARASI FUGSI
+void ina226SetupSensor();
+void bacaSensorDaya();
+void hitungStatusBaterai();
+void tulisRelay(bool nyala);
+void catatHistory(bool state, uint8_t mode);
+void setRelay(bool nyala, uint8_t mode);
+bool cekDalamJadwal(int tahunSekarang, int bulanSekarang, int hariSekarang, int jamSekarang, int menitSekarangArg);
+void cekJadwalRelay();
+void simpanJadwal();
+void muatJadwal();
+void mqttCallback(char *topic, byte *payload, unsigned int length);
+void reconnectMQTT();
+float hitungKecepatan(unsigned long pulsa, float &filteredVal, float dt);
+void pushToFirebase(const char* deviceId, float avgSpeed, float mGust);
+void kirimHistoryKeFirebase(bool state, uint8_t mode, time_t waktu);
+void publishDataGabungan();
+
+
+// =====================================================================
+// ================================ SETUP ==============================
+// =====================================================================
+void setup() {
+  Serial.begin(115200);
+
+  // ---- Relay ----
+  pinMode(RELAY_PIN, OUTPUT);
+  tulisRelay(false);
+
+  // ---- Anemometer ----
+  pinMode(ANEMO1, INPUT);
+  pinMode(ANEMO2, INPUT);
+  pinMode(ANEMO3, INPUT);
+  attachInterrupt(digitalPinToInterrupt(ANEMO1), isr1, RISING);
+  attachInterrupt(digitalPinToInterrupt(ANEMO2), isr2, RISING);
+  attachInterrupt(digitalPinToInterrupt(ANEMO3), isr3, RISING);
+
+  // ---- I2C & INA226 ----
+  Wire.begin(I2C_SDA, I2C_SCL);
+  ina226SetupSensor();
+
+  // ---- WiFi (WiFiManager, sama seperti versi ESP8266) ----
+  WiFiManager wifiManager;
+  wifiManager.autoConnect("ESP32-Turbin-Multi v.1");
+  Serial.println("WiFi Terhubung!");
+
+  // ---- RTC DS3231 ----
+  if (!rtc.begin()) {
+    Serial.println("ERROR: RTC DS3231 tidak terdeteksi! Cek wiring I2C (SDA/SCL) & alamat 0x68.");
+    rtcSiap = false;
+  } else {
+    rtcSiap = true;
+    if (rtc.lostPower()) {
+      // RTC kehilangan daya (baterai CR2032 modul habis / baru pertama pasang).
+      // Set sementara dari waktu KOMPILASI kode ini (asumsi dikompilasi di
+      // waktu lokal WIB) - akan dikoreksi otomatis oleh NTP di bawah kalau
+      // ESP32 berhasil konek WiFi.
+      Serial.println("RTC kehilangan daya, set awal dari waktu kompilasi...");
+      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
+    }
+  }
+
+  // ---- NTP: dipanggil sekali di sini untuk mengaktifkan klien SNTP
+  // background bawaan ESP32 (akan terus sinkronisasi sendiri selama WiFi
+  // hidup -- lihat waktuSekarangJamMenit()/epochUtcSekarang() yang otomatis
+  // pakai NTP kalau tersedia, RTC sebagai cadangan kalau tidak). Di sini
+  // juga sekalian mengoreksi RTC dengan waktu NTP yang akurat, supaya kalau
+  // nanti offline lama, RTC tidak terlalu ngaco.
+  if (WiFi.status() == WL_CONNECTED) {
+    configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov"); // WIB (UTC+7)
+    struct tm waktuNtp;
+    if (getLocalTime(&waktuNtp, 5000)) { // tunggu maks 5 detik
+      if (rtcSiap) {
+        rtc.adjust(DateTime(waktuNtp.tm_year + 1900, waktuNtp.tm_mon + 1, waktuNtp.tm_mday,
+                             waktuNtp.tm_hour, waktuNtp.tm_min, waktuNtp.tm_sec));
+        Serial.println("RTC berhasil disinkronkan dari NTP.");
+      }
+    } else {
+      Serial.println("NTP tidak tersedia, pakai waktu RTC yang tersimpan.");
+    }
+  }
+
+  // ---- Firebase (skip verifikasi SSL, hemat resource) ----
+  secureClient.setInsecure();
+
+  // ---- MQTT ----
+  // PENTING: default buffer PubSubClient hanya 256 byte. Payload JSON gabungan
+  // kita (angin+daya+baterai+relay) bisa >300 byte, sehingga TANPA baris di
+  // bawah ini publish() akan gagal diam-diam (return false) tanpa error jelas.
+  mqtt.setBufferSize(1024);
+  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
+  mqtt.setCallback(mqttCallback);
+
+  // ---- Muat konfigurasi relay tersimpan ----
+  muatJadwal();
+  // DEBUG SEMENTARA — hapus setelah masalah selesai
+  // Serial.println("=== ISI JADWAL SETELAH MUAT DARI NVS ===");
+  // for (int i = 0; i < JUMLAH_SLOT_JADWAL; i++) {
+  //   Serial.printf("Slot %d: aktif=%d | mulai=%04d-%02d-%02d %02d:%02d | selesai=%04d-%02d-%02d %02d:%02d\n",
+  //     i, jadwal[i].aktif,
+  //     jadwal[i].tahunMulai, jadwal[i].bulanMulai, jadwal[i].hariMulai, jadwal[i].jamMulai, jadwal[i].menitMulai,
+  //     jadwal[i].tahunSelesai, jadwal[i].bulanSelesai, jadwal[i].hariSelesai, jadwal[i].jamSelesai, jadwal[i].menitSelesai);
+  // }
+}
+
+// =====================================================================
+// ================================ LOOP ================================
+// =====================================================================
+void loop() {
+  // WiFiManager.autoConnect() di setup() hanya menyambungkan sekali di awal.
+  // Kalau WiFi putus di tengah jalan (router restart, sinyal hilang, dll),
+  // tanpa baris ini ESP32 tidak akan pernah otomatis konek ulang.
+  if (WiFi.status() != WL_CONNECTED) {
+    static unsigned long lastWifiRetry = 0;
+    if (millis() - lastWifiRetry >= 5000) {
+      lastWifiRetry = millis();
+      Serial.println("WiFi terputus, mencoba reconnect...");
+      WiFi.reconnect();
+    }
+    return; // tunggu WiFi nyambung dulu sebelum lanjut ke MQTT/sensor
+  }
+
+  if (!mqtt.connected()) {
+    reconnectMQTT();
+  }
+  mqtt.loop();
+
+  unsigned long currentMillis = millis();
+
+  // ---------------------------------------------------------
+  // LOGIKA 1: BACA ANEMOMETER + SENSOR DAYA & PUBLISH MQTT (2 detik)
+  // ---------------------------------------------------------
+  if (currentMillis - lastReadMillis >= interval2s) {
+    float dt = (currentMillis - lastReadMillis) / 1000.0;
+    lastReadMillis = currentMillis;
+
+    noInterrupts();
+    unsigned long p1 = pulse1; pulse1 = 0;
+    unsigned long p2 = pulse2; pulse2 = 0;
+    unsigned long p3 = pulse3; pulse3 = 0;
+    interrupts();
+
+    float s1 = hitungKecepatan(p1, filtered1, dt);
+    float s2 = hitungKecepatan(p2, filtered2, dt);
+    float s3 = hitungKecepatan(p3, filtered3, dt);
+
+    sum1 += s1; sum2 += s2; sum3 += s3;
+    readCountAngin++;
+
+    if (s1 > max1) max1 = s1;
+    if (s2 > max2) max2 = s2;
+    if (s3 > max3) max3 = s3;
+
+    anginS1 = s1; anginS2 = s2; anginS3 = s3;
+
+    Serial.printf("Angin -> S1: %.2f | S2: %.2f | S3: %.2f (m/s)\n", s1, s2, s3);
+
+    // Baca sensor daya + hitung status baterai, lalu publish SEMUA data
+    // monitoring (angin, daya, baterai, relay) dalam satu topik JSON.
+    bacaSensorDaya();
+    publishDataGabungan();
+
+    Serial.printf("Masuk  -> V:%.2f I:%.3f P:%.2f | Keluar -> V:%.2f I:%.3f P:%.2f | Baterai: %.2fV (%d%%, %s)\n",
+                  teganganMasuk, arusMasuk, dayaMasuk,
+                  teganganKeluar, arusKeluar, dayaKeluar,
+                  teganganBaterai, persenBaterai, statusBaterai.c_str());
+  }
+
+  // ---------------------------------------------------------
+  // LOGIKA 2: CEK JADWAL RELAY (setiap 15 detik, hanya mode AUTO)
+  // ---------------------------------------------------------
+  if (currentMillis - lastJadwalCekMillis >= intervalJadwal) {
+    lastJadwalCekMillis = currentMillis;
+    cekJadwalRelay();
+  }
+
+  // ---------------------------------------------------------
+  // LOGIKA 3: REKAP & KIRIM KE FIREBASE (setiap 5 menit)
+  // ---------------------------------------------------------
+  if (currentMillis - lastFirebaseMillis >= interval5m) {
+    lastFirebaseMillis = currentMillis;
+
+    if (readCountAngin > 0) {
+      float avg1 = sum1 / readCountAngin;
+      float avg2 = sum2 / readCountAngin;
+      float avg3 = sum3 / readCountAngin;
+
+      Serial.println("\n=== MENGIRIM REKAP 5 MENIT KE FIREBASE ===");
+      pushToFirebase("ANEMO-001", avg1, max1);
+      pushToFirebase("ANEMO-002", avg2, max2);
+      pushToFirebase("ANEMO-003", avg3, max3);
+
+      sum1 = 0; sum2 = 0; sum3 = 0;
+      max1 = 0; max2 = 0; max3 = 0;
+      readCountAngin = 0;
+    }
+  }
+}
+
 // =====================================================================
 // ============================ FUNGSI INA226 =========================
 // =====================================================================
@@ -270,13 +476,13 @@ void ina226SetupSensor() {
 }
 
 void bacaSensorDaya() {
-  teganganMasuk = ina226Masuk.getBusVoltage();   // Volt
-  arusMasuk     = ina226Masuk.getCurrent();      // Ampere
-  dayaMasuk     = ina226Masuk.getPower();        // Watt
+  teganganMasuk = 11.50;//ina226Masuk.getBusVoltage();   // Volt
+  arusMasuk     = 2.5;//ina226Masuk.getCurrent();      // Ampere
+  dayaMasuk     = 3.6;//ina226Masuk.getPower();        // Watt
 
-  teganganKeluar = ina226Keluar.getBusVoltage();
-  arusKeluar     = ina226Keluar.getCurrent();
-  dayaKeluar     = ina226Keluar.getPower();
+  teganganKeluar = 12.50;//ina226Keluar.getBusVoltage();
+  arusKeluar     = 2.31;//ina226Keluar.getCurrent();
+  dayaKeluar     = 3.4;//ina226Keluar.getPower();
 
   hitungStatusBaterai();
 }
@@ -372,9 +578,9 @@ void cekJadwalRelay() {
   setRelay(harusNyala, 0);
 }
 
-  bool harusNyala = cekDalamJadwal(jam, menit);
-  setRelay(harusNyala, 0);
-}
+//   bool harusNyala = cekDalamJadwal(jam, menit);
+//   setRelay(harusNyala, 0);
+// }
 
 // =====================================================================
 // ==================== SIMPAN / MUAT JADWAL (NVS) ====================
@@ -406,11 +612,11 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
   String pesan;
   for (unsigned int i = 0; i < length; i++) pesan += (char)payload[i];
   pesan.trim();
-  pesan.toUpperCase();
 
   String t = String(topic);
 
   if (t == String(TOPIK_DASAR) + "relay/set") {
+    pesan.toUpperCase();
     if (pesan == "ON") {
       relayMode = 1;
       setRelay(true, 1);
@@ -428,7 +634,7 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
     // [{"mulai":"2026-07-16 06:00","selesai":"2026-07-16 09:00","aktif":true}, ...]
     // Format lama (tanpa tanggal) juga tetap didukung untuk backward compat:
     // [{"mulai":"06:00","selesai":"09:00","aktif":true}, ...]
-    StaticJsonDocument<1024> doc;
+    StaticJsonDocument<2048> doc;
     DeserializationError err = deserializeJson(doc, pesan);
     if (!err && doc.is<JsonArray>()) {
       JsonArray arr = doc.as<JsonArray>();
@@ -467,6 +673,8 @@ void mqttCallback(char *topic, byte *payload, unsigned int length) {
         idx++;
       }
       simpanJadwal();
+      // Langsung cek jadwal agar relay berubah segera (tidak nunggu siklus 15 detik)
+      cekJadwalRelay();
       Serial.println("Jadwal relay diperbarui.");
     } else {
       Serial.println("Format JSON jadwal tidak valid.");
@@ -551,7 +759,10 @@ void pushToFirebase(const char* deviceId, float avgSpeed, float mGust) {
 }
 
 void kirimHistoryKeFirebase(bool state, uint8_t mode, time_t waktu) {
-  if (WiFi.status() != WL_CONNECTED) return;
+  if (WiFi.status() != WL_CONNECTED) {
+    Serial.printf("WARNING: WiFi down, history %s tidak terkirim!\n", state ? "ON" : "OFF");
+    return;
+  }
   HTTPClient http;
   String url = String(FIREBASE_HOST) + "history/relay.json";
 
@@ -563,8 +774,15 @@ void kirimHistoryKeFirebase(bool state, uint8_t mode, time_t waktu) {
                     ",\"epoch\":" + String((unsigned long)waktu) +
                     ",\"ts\":{\".sv\":\"timestamp\"}}";
 
-  int httpResponseCode = http.POST(payload); // POST -> Firebase auto-generate push key
-  if (httpResponseCode <= 0) {
+  // Retry 3x kalau gagal
+  int httpResponseCode = -1;
+  for (int retry = 0; retry < 3 && httpResponseCode <= 0; retry++) {
+    if (retry > 0) delay(200);
+    httpResponseCode = http.POST(payload);
+  }
+  if (httpResponseCode > 0) {
+    Serial.printf("History %s -> Firebase OK\n", state ? "ON" : "OFF");
+  } else {
     Serial.printf("Firebase Gagal (history): %s\n", http.errorToString(httpResponseCode).c_str());
   }
   http.end();
@@ -577,7 +795,7 @@ void kirimHistoryKeFirebase(bool state, uint8_t mode, time_t waktu) {
 // digabung jadi SATU topik JSON, retained, supaya dashboard cukup subscribe
 // 1 topik dan langsung dapat state terakhir saat reconnect.
 void publishDataGabungan() {
-  StaticJsonDocument<1024> doc;
+  StaticJsonDocument<2048> doc;
 
   JsonObject angin = doc.createNestedObject("angin");
   angin["s1"] = anginS1;
@@ -637,177 +855,5 @@ void publishDataGabungan() {
   String topik = String(TOPIK_DASAR) + "data";
   if (!mqtt.publish(topik.c_str(), (const uint8_t*)buf, len, true)) { // retained
     Serial.println("WARNING: publish turbin/data gagal (cek MQTT buffer size / koneksi).");
-  }
-}
-
-// =====================================================================
-// ================================ SETUP ==============================
-// =====================================================================
-void setup() {
-  Serial.begin(115200);
-
-  // ---- Relay ----
-  pinMode(RELAY_PIN, OUTPUT);
-  tulisRelay(false);
-
-  // ---- Anemometer ----
-  pinMode(ANEMO1, INPUT);
-  pinMode(ANEMO2, INPUT);
-  pinMode(ANEMO3, INPUT);
-  attachInterrupt(digitalPinToInterrupt(ANEMO1), isr1, RISING);
-  attachInterrupt(digitalPinToInterrupt(ANEMO2), isr2, RISING);
-  attachInterrupt(digitalPinToInterrupt(ANEMO3), isr3, RISING);
-
-  // ---- I2C & INA226 ----
-  Wire.begin(I2C_SDA, I2C_SCL);
-  ina226SetupSensor();
-
-  // ---- WiFi (WiFiManager, sama seperti versi ESP8266) ----
-  WiFiManager wifiManager;
-  wifiManager.autoConnect("ESP32-Turbin-Multi v.1");
-  Serial.println("WiFi Terhubung!");
-
-  // ---- RTC DS3231 ----
-  if (!rtc.begin()) {
-    Serial.println("ERROR: RTC DS3231 tidak terdeteksi! Cek wiring I2C (SDA/SCL) & alamat 0x68.");
-    rtcSiap = false;
-  } else {
-    rtcSiap = true;
-    if (rtc.lostPower()) {
-      // RTC kehilangan daya (baterai CR2032 modul habis / baru pertama pasang).
-      // Set sementara dari waktu KOMPILASI kode ini (asumsi dikompilasi di
-      // waktu lokal WIB) - akan dikoreksi otomatis oleh NTP di bawah kalau
-      // ESP32 berhasil konek WiFi.
-      Serial.println("RTC kehilangan daya, set awal dari waktu kompilasi...");
-      rtc.adjust(DateTime(F(__DATE__), F(__TIME__)));
-    }
-  }
-
-  // ---- NTP: dipanggil sekali di sini untuk mengaktifkan klien SNTP
-  // background bawaan ESP32 (akan terus sinkronisasi sendiri selama WiFi
-  // hidup -- lihat waktuSekarangJamMenit()/epochUtcSekarang() yang otomatis
-  // pakai NTP kalau tersedia, RTC sebagai cadangan kalau tidak). Di sini
-  // juga sekalian mengoreksi RTC dengan waktu NTP yang akurat, supaya kalau
-  // nanti offline lama, RTC tidak terlalu ngaco.
-  if (WiFi.status() == WL_CONNECTED) {
-    configTime(7 * 3600, 0, "pool.ntp.org", "time.nist.gov"); // WIB (UTC+7)
-    struct tm waktuNtp;
-    if (getLocalTime(&waktuNtp, 5000)) { // tunggu maks 5 detik
-      if (rtcSiap) {
-        rtc.adjust(DateTime(waktuNtp.tm_year + 1900, waktuNtp.tm_mon + 1, waktuNtp.tm_mday,
-                             waktuNtp.tm_hour, waktuNtp.tm_min, waktuNtp.tm_sec));
-        Serial.println("RTC berhasil disinkronkan dari NTP.");
-      }
-    } else {
-      Serial.println("NTP tidak tersedia, pakai waktu RTC yang tersimpan.");
-    }
-  }
-
-  // ---- Firebase (skip verifikasi SSL, hemat resource) ----
-  secureClient.setInsecure();
-
-  // ---- MQTT ----
-  // PENTING: default buffer PubSubClient hanya 256 byte. Payload JSON gabungan
-  // kita (angin+daya+baterai+relay) bisa >300 byte, sehingga TANPA baris di
-  // bawah ini publish() akan gagal diam-diam (return false) tanpa error jelas.
-  mqtt.setBufferSize(1024);
-  mqtt.setServer(MQTT_SERVER, MQTT_PORT);
-  mqtt.setCallback(mqttCallback);
-
-  // ---- Muat konfigurasi relay tersimpan ----
-  muatJadwal();
-}
-
-// =====================================================================
-// ================================ LOOP ================================
-// =====================================================================
-void loop() {
-  // WiFiManager.autoConnect() di setup() hanya menyambungkan sekali di awal.
-  // Kalau WiFi putus di tengah jalan (router restart, sinyal hilang, dll),
-  // tanpa baris ini ESP32 tidak akan pernah otomatis konek ulang.
-  if (WiFi.status() != WL_CONNECTED) {
-    static unsigned long lastWifiRetry = 0;
-    if (millis() - lastWifiRetry >= 5000) {
-      lastWifiRetry = millis();
-      Serial.println("WiFi terputus, mencoba reconnect...");
-      WiFi.reconnect();
-    }
-    return; // tunggu WiFi nyambung dulu sebelum lanjut ke MQTT/sensor
-  }
-
-  if (!mqtt.connected()) {
-    reconnectMQTT();
-  }
-  mqtt.loop();
-
-  unsigned long currentMillis = millis();
-
-  // ---------------------------------------------------------
-  // LOGIKA 1: BACA ANEMOMETER + SENSOR DAYA & PUBLISH MQTT (2 detik)
-  // ---------------------------------------------------------
-  if (currentMillis - lastReadMillis >= interval2s) {
-    float dt = (currentMillis - lastReadMillis) / 1000.0;
-    lastReadMillis = currentMillis;
-
-    noInterrupts();
-    unsigned long p1 = pulse1; pulse1 = 0;
-    unsigned long p2 = pulse2; pulse2 = 0;
-    unsigned long p3 = pulse3; pulse3 = 0;
-    interrupts();
-
-    float s1 = hitungKecepatan(p1, filtered1, dt);
-    float s2 = hitungKecepatan(p2, filtered2, dt);
-    float s3 = hitungKecepatan(p3, filtered3, dt);
-
-    sum1 += s1; sum2 += s2; sum3 += s3;
-    readCountAngin++;
-
-    if (s1 > max1) max1 = s1;
-    if (s2 > max2) max2 = s2;
-    if (s3 > max3) max3 = s3;
-
-    anginS1 = s1; anginS2 = s2; anginS3 = s3;
-
-    Serial.printf("Angin -> S1: %.2f | S2: %.2f | S3: %.2f (m/s)\n", s1, s2, s3);
-
-    // Baca sensor daya + hitung status baterai, lalu publish SEMUA data
-    // monitoring (angin, daya, baterai, relay) dalam satu topik JSON.
-    bacaSensorDaya();
-    publishDataGabungan();
-
-    Serial.printf("Masuk  -> V:%.2f I:%.3f P:%.2f | Keluar -> V:%.2f I:%.3f P:%.2f | Baterai: %.2fV (%d%%, %s)\n",
-                  teganganMasuk, arusMasuk, dayaMasuk,
-                  teganganKeluar, arusKeluar, dayaKeluar,
-                  teganganBaterai, persenBaterai, statusBaterai.c_str());
-  }
-
-  // ---------------------------------------------------------
-  // LOGIKA 2: CEK JADWAL RELAY (setiap 15 detik, hanya mode AUTO)
-  // ---------------------------------------------------------
-  if (currentMillis - lastJadwalCekMillis >= intervalJadwal) {
-    lastJadwalCekMillis = currentMillis;
-    cekJadwalRelay();
-  }
-
-  // ---------------------------------------------------------
-  // LOGIKA 3: REKAP & KIRIM KE FIREBASE (setiap 5 menit)
-  // ---------------------------------------------------------
-  if (currentMillis - lastFirebaseMillis >= interval5m) {
-    lastFirebaseMillis = currentMillis;
-
-    if (readCountAngin > 0) {
-      float avg1 = sum1 / readCountAngin;
-      float avg2 = sum2 / readCountAngin;
-      float avg3 = sum3 / readCountAngin;
-
-      Serial.println("\n=== MENGIRIM REKAP 5 MENIT KE FIREBASE ===");
-      pushToFirebase("ANEMO-001", avg1, max1);
-      pushToFirebase("ANEMO-002", avg2, max2);
-      pushToFirebase("ANEMO-003", avg3, max3);
-
-      sum1 = 0; sum2 = 0; sum3 = 0;
-      max1 = 0; max2 = 0; max3 = 0;
-      readCountAngin = 0;
-    }
   }
 }
